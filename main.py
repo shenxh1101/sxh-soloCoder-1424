@@ -38,13 +38,17 @@ def input_prompt(prompt, default=None, required=False):
         print("  该项不能为空，请重新输入。")
 
 
-def input_float(prompt, default=None, required=False):
+def input_float(prompt, default=None, required=False, min_value=None):
     while True:
         val = input_prompt(prompt, default, required)
         if val == "" and not required:
             return 0.0
         try:
-            return float(val)
+            num = float(val)
+            if min_value is not None and num < min_value:
+                print(f"  请输入大于等于 {min_value} 的数字。")
+                continue
+            return num
         except ValueError:
             print("  请输入有效的数字。")
 
@@ -74,15 +78,28 @@ def vehicle_menu():
             break
         elif choice == "1":
             print_header("新增车辆档案")
-            plate = input_prompt("车牌号", required=True)
-            brand = input_prompt("品牌型号", required=True)
-            vin = input_prompt("VIN码", required=True)
-            mileage = input_int("上次保养里程(km)", default=0)
-            vid, err = VehicleService.add_vehicle(plate, brand, vin, mileage)
-            if err:
-                print(f"\n  错误: {err}")
-            else:
-                print(f"\n  车辆档案创建成功，ID: {vid}")
+            while True:
+                try:
+                    plate = input_prompt("车牌号", required=True)
+                    brand = input_prompt("品牌型号", required=True)
+                    vin = input_prompt("VIN码", required=True)
+                    mileage = input_int("上次保养里程(km)", default=0)
+                    vid, err = VehicleService.add_vehicle(plate, brand, vin, mileage)
+                    if err:
+                        print(f"\n  ✗ 错误: {err}")
+                        retry = input("  是否重新输入？(Y/n): ").strip().lower()
+                        if retry == 'n':
+                            break
+                        print()
+                        continue
+                    print(f"\n  ✓ 车辆档案创建成功，ID: {vid}")
+                    break
+                except Exception as e:
+                    print(f"\n  ✗ 操作失败: {str(e)}")
+                    retry = input("  是否重新输入？(Y/n): ").strip().lower()
+                    if retry == 'n':
+                        break
+                    print()
             input("\n按回车继续...")
 
         elif choice == "2":
@@ -130,18 +147,39 @@ def vehicle_menu():
 
         elif choice == "5":
             print_header("删除车辆")
-            plate = input_prompt("请输入车牌号", required=True)
-            v = VehicleService.find_vehicle_by_plate(plate)
-            if not v:
-                print(f"\n  未找到车牌号为 {plate} 的车辆")
-                input("\n按回车继续...")
-                continue
-            confirm = input(f"  确认删除车辆 {plate}？(y/N): ").strip().lower()
-            if confirm == 'y':
-                VehicleService.delete_vehicle(v['id'])
-                print("\n  车辆已删除")
-            else:
-                print("\n  已取消")
+            try:
+                plate = input_prompt("请输入车牌号", required=True)
+                v = VehicleService.find_vehicle_by_plate(plate)
+                if not v:
+                    print(f"\n  ✗ 未找到车牌号为 {plate} 的车辆")
+                    input("\n按回车继续...")
+                    continue
+
+                order_count = VehicleService.get_work_order_count(v['id'])
+                if order_count > 0:
+                    print(f"\n  ⚠  该车辆存在 {order_count} 条维修记录")
+                    print("  直接删除将同时删除所有关联的工单、配件领用记录")
+                    confirm = input(f"  确认级联删除车辆 {plate} 及其所有维修记录？(y/N): ").strip().lower()
+                    if confirm == 'y':
+                        ok, err = VehicleService.delete_vehicle(v['id'], cascade=True)
+                        if ok:
+                            print(f"\n  ✓ 车辆及关联的 {order_count} 条维修记录已删除")
+                        else:
+                            print(f"\n  ✗ 删除失败: {err}")
+                    else:
+                        print("\n  已取消删除")
+                else:
+                    confirm = input(f"  确认删除车辆 {plate}？(y/N): ").strip().lower()
+                    if confirm == 'y':
+                        ok, err = VehicleService.delete_vehicle(v['id'])
+                        if ok:
+                            print("\n  ✓ 车辆已删除")
+                        else:
+                            print(f"\n  ✗ 删除失败: {err}")
+                    else:
+                        print("\n  已取消删除")
+            except Exception as e:
+                print(f"\n  ✗ 操作失败: {str(e)}")
             input("\n按回车继续...")
 
 
@@ -159,16 +197,21 @@ def parts_menu():
             break
         elif choice == "1":
             print_header("新增配件")
-            name = input_prompt("配件名称", required=True)
-            code = input_prompt("配件编号", required=True)
-            price = input_float("单价(元)", required=True, min_value=0)
-            stock = input_int("初始库存数量", default=0)
-            min_stock = input_int("最小库存量(预警阈值)", default=5)
-            pid, err = PartService.add_part(name, code, price, stock, min_stock)
-            if err:
-                print(f"\n  错误: {err}")
-            else:
-                print(f"\n  配件创建成功，ID: {pid}")
+            try:
+                name = input_prompt("配件名称", required=True)
+                code = input_prompt("配件编号", required=True)
+                price = input_float("单价(元)", required=True, min_value=0)
+                stock = input_int("初始库存数量", default=0)
+                min_stock = input_int("最小库存量(预警阈值)", default=5)
+                pid, err = PartService.add_part(name, code, price, stock, min_stock)
+                if err:
+                    print(f"\n  错误: {err}")
+                else:
+                    print(f"\n  配件创建成功，ID: {pid}")
+                    if stock > 0:
+                        print(f"  当前库存: {stock}")
+            except Exception as e:
+                print(f"\n  操作失败: {str(e)}")
             input("\n按回车继续...")
 
         elif choice == "2":
@@ -393,11 +436,27 @@ def select_parts_for_order():
                 continue
             selected = parts[idx]
             qty = input_int("  数量", required=True, min_value=1)
-            if qty > selected['stock']:
-                print(f"  库存不足，当前库存: {selected['stock']}")
-                continue
-            selected_parts.append({'part_id': selected['id'], 'quantity': qty})
-            print(f"  已添加: {selected['name']} x{qty}")
+
+            existing_idx = -1
+            for i, sp in enumerate(selected_parts):
+                if sp['part_id'] == selected['id']:
+                    existing_idx = i
+                    break
+
+            if existing_idx >= 0:
+                current_qty = selected_parts[existing_idx]['quantity']
+                new_qty = current_qty + qty
+                if new_qty > selected['stock']:
+                    print(f"  库存不足，已选{current_qty}件，再加{qty}件共{new_qty}件超过库存{selected['stock']}件")
+                    continue
+                selected_parts[existing_idx]['quantity'] = new_qty
+                print(f"  已更新: {selected['name']} 共 {new_qty}件")
+            else:
+                if qty > selected['stock']:
+                    print(f"  库存不足，当前库存: {selected['stock']}")
+                    continue
+                selected_parts.append({'part_id': selected['id'], 'quantity': qty})
+                print(f"  已添加: {selected['name']} x{qty}")
 
         elif sub == "2":
             if not selected_parts:

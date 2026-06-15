@@ -44,6 +44,15 @@ class VehicleRepository:
         return dict(row) if row else None
 
     @staticmethod
+    def get_by_vin(vin_code):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM vehicles WHERE vin_code = ?", (vin_code,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    @staticmethod
     def update(vehicle_id, **kwargs):
         conn = get_connection()
         cursor = conn.cursor()
@@ -63,12 +72,29 @@ class VehicleRepository:
         conn.close()
 
     @staticmethod
+    def get_work_order_count(vehicle_id):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM work_orders WHERE vehicle_id = ?", (vehicle_id,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+
+    @staticmethod
     def delete(vehicle_id):
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM vehicles WHERE id = ?", (vehicle_id,))
-        conn.commit()
-        conn.close()
+        try:
+            cursor.execute("DELETE FROM work_order_parts WHERE work_order_id IN (SELECT id FROM work_orders WHERE vehicle_id = ?)", (vehicle_id,))
+            cursor.execute("DELETE FROM work_orders WHERE vehicle_id = ?", (vehicle_id,))
+            cursor.execute("DELETE FROM vehicles WHERE id = ?", (vehicle_id,))
+            conn.commit()
+            conn.close()
+            return True, None
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            return False, str(e)
 
 
 class PartRepository:

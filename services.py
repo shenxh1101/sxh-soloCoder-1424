@@ -10,11 +10,18 @@ from datetime import datetime
 class VehicleService:
     @staticmethod
     def add_vehicle(plate_number, brand_model, vin_code, last_maintenance_mileage=0):
-        existing = VehicleRepository.get_by_plate(plate_number)
-        if existing:
-            return None, f"车牌号 {plate_number} 已存在"
+        existing_plate = VehicleRepository.get_by_plate(plate_number)
+        if existing_plate:
+            return None, f"车牌号 {plate_number} 已存在，请检查后重新输入"
+        existing_vin = VehicleRepository.get_by_vin(vin_code)
+        if existing_vin:
+            return None, f"VIN码 {vin_code} 已被车辆 [{existing_vin['plate_number']}] 使用，请检查后重新输入"
         vehicle_id = VehicleRepository.create(plate_number, brand_model, vin_code, last_maintenance_mileage)
         return vehicle_id, None
+
+    @staticmethod
+    def find_vehicle_by_vin(vin_code):
+        return VehicleRepository.get_by_vin(vin_code)
 
     @staticmethod
     def list_vehicles():
@@ -33,8 +40,18 @@ class VehicleService:
         VehicleRepository.update(vehicle_id, **kwargs)
 
     @staticmethod
-    def delete_vehicle(vehicle_id):
-        VehicleRepository.delete(vehicle_id)
+    def delete_vehicle(vehicle_id, cascade=False):
+        order_count = VehicleRepository.get_work_order_count(vehicle_id)
+        if order_count > 0 and not cascade:
+            return False, f"该车辆存在 {order_count} 条维修记录，无法直接删除。如需删除请选择级联删除（将同时删除所有关联工单）"
+        ok, err = VehicleRepository.delete(vehicle_id)
+        if not ok:
+            return False, err
+        return True, None
+
+    @staticmethod
+    def get_work_order_count(vehicle_id):
+        return VehicleRepository.get_work_order_count(vehicle_id)
 
     @staticmethod
     def check_maintenance_due(vehicle_id, current_mileage):
@@ -192,6 +209,16 @@ class WorkOrderService:
     def create_work_order(vehicle_id, mileage, fault_description, fault_code_id=None,
                           labor_cost=0, parts=None):
         parts = parts or []
+
+        merged_parts = {}
+        for p in parts:
+            pid = p['part_id']
+            if pid in merged_parts:
+                merged_parts[pid]['quantity'] += p['quantity']
+            else:
+                merged_parts[pid] = {'part_id': pid, 'quantity': p['quantity']}
+        parts = list(merged_parts.values())
+
         parts_total = 0.0
         valid_parts = []
 
