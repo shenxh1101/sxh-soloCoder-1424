@@ -74,7 +74,9 @@ def init_db():
         fault_code_id INTEGER,
         labor_cost REAL NOT NULL DEFAULT 0,
         total_cost REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'NORMAL',
         created_at TEXT NOT NULL,
+        updated_at TEXT,
         FOREIGN KEY (vehicle_id) REFERENCES vehicles(id),
         FOREIGN KEY (fault_code_id) REFERENCES fault_codes(id)
     )
@@ -109,6 +111,22 @@ def init_db():
     ''')
 
     conn.commit()
+    conn.close()
+
+
+def migrate_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("PRAGMA table_info(work_orders)")
+        cols = [row[1] for row in cursor.fetchall()]
+        if 'status' not in cols:
+            cursor.execute("ALTER TABLE work_orders ADD COLUMN status TEXT NOT NULL DEFAULT 'NORMAL'")
+        if 'updated_at' not in cols:
+            cursor.execute("ALTER TABLE work_orders ADD COLUMN updated_at TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
     conn.close()
 
 

@@ -85,7 +85,14 @@ class VehicleRepository:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("DELETE FROM work_order_parts WHERE work_order_id IN (SELECT id FROM work_orders WHERE vehicle_id = ?)", (vehicle_id,))
+            cursor.execute(
+                "DELETE FROM parts_transactions WHERE order_id IN (SELECT id FROM work_orders WHERE vehicle_id = ?)",
+                (vehicle_id,)
+            )
+            cursor.execute(
+                "DELETE FROM work_order_parts WHERE work_order_id IN (SELECT id FROM work_orders WHERE vehicle_id = ?)",
+                (vehicle_id,)
+            )
             cursor.execute("DELETE FROM work_orders WHERE vehicle_id = ?", (vehicle_id,))
             cursor.execute("DELETE FROM vehicles WHERE id = ?", (vehicle_id,))
             conn.commit()
@@ -397,7 +404,34 @@ class WorkOrderRepository:
     def update_total_cost(order_id, total_cost):
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("UPDATE work_orders SET total_cost = ? WHERE id = ?", (total_cost, order_id))
+        cursor.execute(
+            "UPDATE work_orders SET total_cost = ?, updated_at = ? WHERE id = ?",
+            (total_cost, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), order_id)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def update_status(order_id, status):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE work_orders SET status = ?, updated_at = ? WHERE id = ?",
+            (status, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), order_id)
+        )
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def update_full(order_id, **kwargs):
+        if not kwargs:
+            return
+        conn = get_connection()
+        cursor = conn.cursor()
+        kwargs['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        set_clause = ", ".join([f"{k} = ?" for k in kwargs.keys()])
+        values = list(kwargs.values()) + [order_id]
+        cursor.execute(f"UPDATE work_orders SET {set_clause} WHERE id = ?", values)
         conn.commit()
         conn.close()
 
@@ -405,9 +439,17 @@ class WorkOrderRepository:
     def delete(order_id):
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM work_orders WHERE id = ?", (order_id,))
-        conn.commit()
-        conn.close()
+        try:
+            cursor.execute("DELETE FROM work_order_parts WHERE work_order_id = ?", (order_id,))
+            cursor.execute("DELETE FROM parts_transactions WHERE order_id = ?", (order_id,))
+            cursor.execute("DELETE FROM work_orders WHERE id = ?", (order_id,))
+            conn.commit()
+            conn.close()
+            return True, None
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            return False, str(e)
 
 
 class WorkOrderPartRepository:
@@ -467,6 +509,15 @@ class PurchaseSuggestionRepository:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def get_by_id(ps_id):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM purchase_suggestions WHERE id = ?", (ps_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
 
     @staticmethod
     def get_pending():

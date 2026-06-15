@@ -1,12 +1,13 @@
 import sys
-from database import init_db, seed_sample_data, MAINTENANCE_INTERVAL
+from database import init_db, seed_sample_data, MAINTENANCE_INTERVAL, migrate_db
 from services import (
     VehicleService, PartService, FaultCodeService,
     WorkOrderService, PurchaseSuggestionService
 )
 from reports import (
     export_parts_transactions, export_revenue_report,
-    generate_history_report, save_history_report
+    generate_history_report, save_history_report,
+    export_parts_template, export_parts_list, import_parts_from_excel
 )
 
 
@@ -71,7 +72,10 @@ def input_int(prompt, default=None, required=False, min_value=0):
 def vehicle_menu():
     while True:
         print_header("车辆档案管理")
-        print_menu(["新增车辆档案", "查看所有车辆", "按车牌号查询", "修改车辆信息", "删除车辆"])
+        print_menu([
+            "新增车辆档案", "查看所有车辆", "按车牌号查询",
+            "车辆维修概览(快速视图)", "修改车辆信息", "删除车辆"
+        ])
         choice = input("请选择操作: ").strip()
 
         if choice == "0":
@@ -131,6 +135,51 @@ def vehicle_menu():
             input("\n按回车继续...")
 
         elif choice == "4":
+            print_header("车辆维修概览")
+            plate = input_prompt("请输入车牌号", required=True)
+            try:
+                ok, result = WorkOrderService.get_vehicle_overview(plate)
+                if not ok:
+                    print(f"\n  ✗ {result}")
+                    input("\n按回车继续...")
+                    continue
+                v = result['vehicle']
+                print()
+                print(f"  ┌{'─' * 56}┐")
+                print(f"  │  {'车辆信息':<18}{' ':>34}│")
+                print(f"  ├{'─' * 56}┤")
+                print(f"  │  车牌号: {v['plate_number']:<20}品牌: {v['brand_model']:<16}│")
+                print(f"  │  VIN码:  {v['vin_code']:<40}│")
+                print(f"  ├{'─' * 56}┤")
+                print(f"  │  {'维修统计':<18}{' ':>34}│")
+                print(f"  ├{'─' * 56}┤")
+                print(f"  │  累计维修: {result['order_count']:<4}次    累计花费: ¥{result['total_spent']:<10}│")
+                if result['void_count'] > 0:
+                    print(f"  │  撤销工单: {result['void_count']:<4}次{' ':>36}│")
+                print(f"  ├{'─' * 56}┤")
+                print(f"  │  {'保养状态':<18}{' ':>34}│")
+                print(f"  ├{'─' * 56}┤")
+                print(f"  │  当前里程: {result['latest_mileage']:<5}km   上次保养: {v['last_maintenance_mileage']:<5}km│")
+                diff = result['mileage_since_maintenance']
+                if result['maintenance_due']:
+                    print(f"  │  ⚠ 已超保养周期 {diff - MAINTENANCE_INTERVAL} km，建议立即保养！│")
+                else:
+                    print(f"  │  已行驶 {diff:<5}km   剩余 {result['maintenance_remaining']:<5}km 到保养│")
+                print(f"  ├{'─' * 56}┤")
+                print(f"  │  最近 {len(result['recent_orders'])} 次维修记录:{' ':>28}│")
+                print(f"  ├{'─' * 56}┤")
+                if not result['recent_orders']:
+                    print(f"  │  暂无维修记录{' ':>42}│")
+                else:
+                    for o in result['recent_orders']:
+                        desc = o['fault_description'][:16]
+                        print(f"  │  {o['created_at'][:10]} {desc:<14}¥{o['total_cost']:<8}│")
+                print(f"  └{'─' * 56}┘")
+            except Exception as e:
+                print(f"\n  ✗ 概览生成失败: {str(e)}")
+            input("\n按回车继续...")
+
+        elif choice == "5":
             print_header("修改车辆信息")
             plate = input_prompt("请输入车牌号", required=True)
             v = VehicleService.find_vehicle_by_plate(plate)
@@ -145,7 +194,7 @@ def vehicle_menu():
             print("\n  车辆信息已更新")
             input("\n按回车继续...")
 
-        elif choice == "5":
+        elif choice == "6":
             print_header("删除车辆")
             try:
                 plate = input_prompt("请输入车牌号", required=True)
@@ -189,7 +238,8 @@ def parts_menu():
         print_header("配件库存管理")
         print_menu([
             "新增配件", "查看所有配件", "搜索配件", "配件入库", "配件出库",
-            "查看库存预警", "查看采购建议", "配件出入库明细"
+            "查看库存预警", "处理采购建议", "配件出入库明细",
+            "批量导入配件", "导出配件清单", "生成导入模板"
         ])
         choice = input("请选择操作: ").strip()
 
@@ -294,17 +344,91 @@ def parts_menu():
             input("\n按回车继续...")
 
         elif choice == "7":
-            print_header("采购建议")
-            suggestions = PurchaseSuggestionService.generate_all_suggestions()
-            if not suggestions:
-                print("  当前无待处理的采购建议")
-            else:
-                print(f"  {'ID':<6}{'配件名称':<16}{'当前库存':<10}{'建议采购量':<10}创建时间")
-                print("  " + "-" * 58)
-                for s in suggestions:
-                    print(f"  {s['id']:<6}{s['part_name']:<16}{s['current_stock']:<10}"
-                          f"{s['suggested_quantity']:<10}{s['created_at']}")
-            input("\n按回车继续...")
+            while True:
+                print_header("采购建议管理")
+                try:
+                    stats = PurchaseSuggestionService.get_suggestion_statistics()
+                    print(f"  📊 统计概览: 待处理{stats['pending_count']} | 已处理{stats['processed_count']} | 已忽略{stats['ignored_count']}")
+                    print(f"           缺件{stats['pending_parts_count']}种 | 待采购{stats['total_pending_qty']}件 | 预估金额¥{stats['total_suggested_value']}")
+                except Exception:
+                    pass
+                print()
+                print("  1. 查看待处理采购建议")
+                print("  2. 处理单条采购建议(入库)")
+                print("  3. 标记采购建议为忽略")
+                print("  4. 查看全部采购建议(含历史)")
+                print("  5. 重新生成采购建议(扫一遍库存)")
+                print("  0. 返回配件管理菜单")
+                sub = input("\n请选择: ").strip()
+
+                if sub == "0":
+                    break
+                elif sub == "1":
+                    suggestions = PurchaseSuggestionService.list_suggestions('PENDING')
+                    if not suggestions:
+                        print("\n  当前无待处理的采购建议")
+                    else:
+                        print(f"\n  {'ID':<6}{'配件名称':<16}{'当前库存':<10}{'建议量':<8}{'缺口':<8}创建时间")
+                        print("  " + "-" * 62)
+                        for s in suggestions:
+                            gap = max(0, 5 - s['current_stock'])
+                            print(f"  {s['id']:<6}{s['part_name']:<16}{s['current_stock']:<10}"
+                                  f"{s['suggested_quantity']:<8}{gap:<8}{s['created_at']}")
+                    input("\n按回车继续...")
+
+                elif sub == "2":
+                    suggestions = PurchaseSuggestionService.list_suggestions('PENDING')
+                    if not suggestions:
+                        print("\n  当前无待处理的采购建议")
+                        input("\n按回车继续...")
+                        continue
+                    print(f"\n  {'ID':<6}{'配件名称':<16}{'当前库存':<10}{'建议采购量':<12}")
+                    print("  " + "-" * 46)
+                    for s in suggestions:
+                        print(f"  {s['id']:<6}{s['part_name']:<16}{s['current_stock']:<10}{s['suggested_quantity']:<12}")
+                    ps_id = input_int("\n请输入要处理的采购建议ID", required=True, min_value=1)
+                    ps_item = next((s for s in suggestions if s['id'] == ps_id), None)
+                    default_qty = ps_item['suggested_quantity'] if ps_item else None
+                    qty = input_int("实际采购入库数量", default=default_qty, required=True, min_value=1)
+                    ok, res = PurchaseSuggestionService.mark_processed(ps_id, qty)
+                    if ok:
+                        print(f"\n  ✓ 处理成功: {res['part_name']}({res['part_code']})")
+                        print(f"    采购入库: {res['purchased_qty']}件，新库存: {res['new_stock']}件")
+                    else:
+                        print(f"\n  ✗ 处理失败: {res}")
+                    input("\n按回车继续...")
+
+                elif sub == "3":
+                    suggestions = PurchaseSuggestionService.list_suggestions('PENDING')
+                    if not suggestions:
+                        print("\n  当前无待处理的采购建议")
+                        input("\n按回车继续...")
+                        continue
+                    ps_id = input_int("请输入要标记忽略的采购建议ID", required=True, min_value=1)
+                    PurchaseSuggestionService.mark_ignored(ps_id)
+                    print("\n  ✓ 已标记为忽略")
+                    input("\n按回车继续...")
+
+                elif sub == "4":
+                    all_s = PurchaseSuggestionService.list_suggestions()
+                    if not all_s:
+                        print("\n  暂无采购建议记录")
+                    else:
+                        status_map = {'PENDING': '待处理', 'PROCESSED': '已处理', 'IGNORED': '已忽略'}
+                        print(f"\n  {'ID':<6}{'配件名称':<16}{'建议量':<8}{'状态':<10}创建时间")
+                        print("  " + "-" * 56)
+                        for s in all_s:
+                            st = status_map.get(s['status'], s['status'])
+                            print(f"  {s['id']:<6}{s['part_name']:<16}{s['suggested_quantity']:<8}{st:<10}{s['created_at']}")
+                    input("\n按回车继续...")
+
+                elif sub == "5":
+                    suggestions = PurchaseSuggestionService.generate_all_suggestions()
+                    print(f"\n  ✓ 扫描完成，生成/保留待处理建议 {len(suggestions)} 条")
+                    if suggestions:
+                        for s in suggestions:
+                            print(f"    - {s['part_name']}: 库存{s['current_stock']}件，建议采购{s['suggested_quantity']}件")
+                    input("\n按回车继续...")
 
         elif choice == "8":
             print_header("配件出入库明细")
@@ -326,6 +450,52 @@ def parts_menu():
                     print(f"  {t['created_at']:<20}{t.get('part_code',''):<10}"
                           f"{t.get('part_name',''):<16}{t_type:<6}{t['quantity']:<6}"
                           f"{t.get('note','') or ''}")
+            input("\n按回车继续...")
+
+        elif choice == "9":
+            print_header("批量导入配件")
+            print("  提示: 请先选择[生成导入模板]获取Excel格式模板")
+            fpath = input_prompt("请输入Excel文件完整路径", required=True).strip().strip('"')
+            try:
+                ok, err, success_list, failure_list = import_parts_from_excel(fpath)
+                if not ok:
+                    print(f"\n  ✗ 导入失败: {err}")
+                    input("\n按回车继续...")
+                    continue
+                print(f"\n  {'=' * 58}")
+                print(f"  导入完成: 共 {len(success_list) + len(failure_list)} 条, 成功 {len(success_list)} 条, 失败 {len(failure_list)} 条")
+                print(f"  {'=' * 58}")
+                if success_list:
+                    print(f"\n  ✓ 成功导入的配件 ({len(success_list)} 条):")
+                    print(f"  {'行号':<6}{'ID':<6}{'编号':<12}{'名称':<18}{'单价':<10}{'库存'}")
+                    print("  " + "-" * 60)
+                    for s in success_list:
+                        print(f"  {s['row']:<6}{s['id']:<6}{s['code']:<12}{s['name']:<18}{s['price']:<10.2f}{s['stock']}")
+                if failure_list:
+                    print(f"\n  ✗ 导入失败的配件 ({len(failure_list)} 条):")
+                    for f in failure_list:
+                        print(f"    第{f['row']}行 [{f.get('code','空') or '空'}-{f.get('name','')}]: {'; '.join(f['errors'])}")
+            except Exception as e:
+                print(f"\n  ✗ 导入异常: {str(e)}")
+            input("\n按回车继续...")
+
+        elif choice == "10":
+            print_header("导出配件清单")
+            ok, res = export_parts_list()
+            if ok:
+                print(f"\n  ✓ 导出成功! 文件路径: {res}")
+            else:
+                print(f"\n  ✗ 导出失败: {res}")
+            input("\n按回车继续...")
+
+        elif choice == "11":
+            print_header("生成配件导入模板")
+            ok, res = export_parts_template()
+            if ok:
+                print(f"\n  ✓ 模板生成成功! 文件路径: {res}")
+                print(f"  请用Excel打开编辑，填写后使用[批量导入配件]功能导入")
+            else:
+                print(f"\n  ✗ 生成失败: {res}")
             input("\n按回车继续...")
 
 
@@ -475,7 +645,11 @@ def select_parts_for_order():
 def work_order_menu():
     while True:
         print_header("维修工单管理")
-        print_menu(["创建工单", "查看所有工单", "查看工单详情", "查询车辆维修历史"])
+        print_menu([
+            "创建工单", "查看所有工单", "查看工单详情",
+            "撤销工单(回滚库存/金额)", "重新结算工单",
+            "查询车辆维修历史"
+        ])
         choice = input("请选择操作: ").strip()
 
         if choice == "0":
@@ -551,8 +725,13 @@ def work_order_menu():
                 print(f"\n  未找到工单号 {oid}")
                 input("\n按回车继续...")
                 continue
+            status_map = {'NORMAL': '正常', 'VOID': '已撤销'}
+            st = status_map.get(order.get('status', 'NORMAL'), order.get('status', ''))
             print(f"\n  工单号:       {order['id']}")
+            print(f"  状态:         {st}")
             print(f"  创建时间:     {order['created_at']}")
+            if order.get('updated_at'):
+                print(f"  最后更新:     {order['updated_at']}")
             print(f"  车牌号:       {order.get('plate_number', '')}")
             print(f"  品牌型号:     {order.get('brand_model', '')}")
             print(f"  进厂里程:     {order['mileage']} km")
@@ -578,6 +757,174 @@ def work_order_menu():
             input("\n按回车继续...")
 
         elif choice == "4":
+            print_header("撤销工单")
+            oid = input_int("请输入要撤销的工单号", required=True, min_value=1)
+            try:
+                order = WorkOrderService.get_work_order_detail(oid)
+                if not order:
+                    print(f"\n  ✗ 未找到工单号 {oid}")
+                    input("\n按回车继续...")
+                    continue
+                status_map = {'NORMAL': '正常', 'VOID': '已撤销'}
+                st = status_map.get(order.get('status', 'NORMAL'), order.get('status', ''))
+                print(f"\n  工单 #{oid} 信息:")
+                print(f"    车牌号: {order.get('plate_number', '')} | 总金额: ¥{order['total_cost']:.2f}")
+                print(f"    当前状态: {st}")
+                print(f"    配件数: {len(order['parts'])} 项")
+
+                confirm = input(f"\n  ⚠ 撤销后库存将回滚、维修历史将排除该工单，确认撤销？(y/N): ").strip().lower()
+                if confirm != 'y':
+                    print("\n  已取消")
+                    input("\n按回车继续...")
+                    continue
+
+                ok, res = WorkOrderService.cancel_work_order(oid)
+                if ok:
+                    print(f"\n  ✓ 工单撤销成功！")
+                    print(f"    返还配件数量: {res['returned_stock']} 件")
+                    print(f"    冲销总金额: ¥{res['refund_amount']:.2f}")
+                    print(f"    工单状态已标记为: 已撤销")
+                else:
+                    print(f"\n  ✗ 撤销失败: {res}")
+            except Exception as e:
+                print(f"\n  ✗ 操作异常: {str(e)}")
+            input("\n按回车继续...")
+
+        elif choice == "5":
+            print_header("重新结算工单")
+            oid = input_int("请输入要重新结算的工单号", required=True, min_value=1)
+            try:
+                order = WorkOrderService.get_work_order_detail(oid)
+                if not order:
+                    print(f"\n  ✗ 未找到工单号 {oid}")
+                    input("\n按回车继续...")
+                    continue
+                if order.get('status') == 'VOID':
+                    print(f"\n  ✗ 该工单已撤销，无法重新结算")
+                    input("\n按回车继续...")
+                    continue
+
+                print(f"\n  当前工单 #{oid}:")
+                print(f"    车牌号: {order.get('plate_number','')} | 里程: {order['mileage']} km")
+                print(f"    原故障描述: {order['fault_description']}")
+                print(f"    原总金额: ¥{order['total_cost']:.2f} (配件¥{sum(p['subtotal'] for p in order['parts']):.2f} + 工时¥{order['labor_cost']:.2f})")
+
+                print()
+                keep_desc = input("  保留原故障描述？(Y/n): ").strip().lower()
+                new_desc = None
+                if keep_desc != 'y' and keep_desc != '':
+                    new_desc = input_prompt("  新故障描述", required=True)
+
+                new_fc_id = None
+                use_fc = input("  是否重新选择故障码？(y/N): ").strip().lower()
+                if use_fc == 'y':
+                    kw = input_prompt("  搜索故障码", required=True)
+                    codes = FaultCodeService.search_fault_codes(kw)
+                    if codes:
+                        for i, fc in enumerate(codes, 1):
+                            print(f"    {i}. [{fc['code']}] {fc['description']}")
+                        idx = input_int("  选择序号(0为清空)", default=0) - 1
+                        if idx >= 0 and idx < len(codes):
+                            new_fc_id = codes[idx]['id']
+                            if not new_desc:
+                                new_desc = codes[idx]['description']
+
+                new_labor = None
+                keep_labor = input("  保留原工时费？(Y/n): ").strip().lower()
+                if keep_labor != 'y' and keep_labor != '':
+                    new_labor = input_float("  新工时费(元)", required=True, min_value=0)
+
+                print(f"\n  --- 重新选择配件（原配件将全部回退库存后重新扣减）---")
+                print("  原配件将先退库，再按新选择重新扣库，原配件可不保留")
+                keep_parts = input("  保留原配件清单？(Y/n): ").strip().lower()
+                if keep_parts == 'y' or keep_parts == '':
+                    new_parts = [{'part_id': p['part_id'], 'quantity': p['quantity']} for p in order['parts']]
+                    print(f"  已保留原配件 {len(new_parts)} 项，可在下方编辑")
+                    while True:
+                        print(f"\n  当前已选配件: {len(new_parts)} 项")
+                        for i, np in enumerate(new_parts, 1):
+                            p = PartService.find_part_by_id(np['part_id'])
+                            print(f"    {i}. {p['name']}({p['code']}) x{np['quantity']}")
+                        print("\n  1. 添加配件")
+                        print("  2. 删除配件")
+                        print("  3. 修改配件数量")
+                        print("  0. 确认完成")
+                        sub = input("\n  请选择: ").strip()
+                        if sub == '0':
+                            break
+                        elif sub == '1':
+                            kw = input_prompt("  搜索配件(名称/编号)", required=True)
+                            parts = PartService.search_parts(kw)
+                            if parts:
+                                for i, p in enumerate(parts, 1):
+                                    print(f"    {i}. {p['code']} {p['name']} ¥{p['price']:.2f} 库存{p['stock']}")
+                                idx2 = input_int("  选择序号", required=True, min_value=1) - 1
+                                if 0 <= idx2 < len(parts):
+                                    sel = parts[idx2]
+                                    qty = input_int("  数量", required=True, min_value=1)
+                                    existing = next((x for x in new_parts if x['part_id'] == sel['id']), None)
+                                    if existing:
+                                        existing['quantity'] += qty
+                                        print(f"  已更新: {sel['name']} 共{existing['quantity']}件")
+                                    else:
+                                        new_parts.append({'part_id': sel['id'], 'quantity': qty})
+                                        print(f"  已添加: {sel['name']} x{qty}")
+                        elif sub == '2':
+                            if not new_parts:
+                                print("  空")
+                                continue
+                            idx2 = input_int("  输入删除序号", required=True, min_value=1) - 1
+                            if 0 <= idx2 < len(new_parts):
+                                removed = new_parts.pop(idx2)
+                                p = PartService.find_part_by_id(removed['part_id'])
+                                print(f"  已删除: {p['name']}")
+                        elif sub == '3':
+                            if not new_parts:
+                                print("  空")
+                                continue
+                            idx2 = input_int("  输入修改序号", required=True, min_value=1) - 1
+                            if 0 <= idx2 < len(new_parts):
+                                new_qty = input_int("  新数量", required=True, min_value=0)
+                                if new_qty == 0:
+                                    removed = new_parts.pop(idx2)
+                                    p = PartService.find_part_by_id(removed['part_id'])
+                                    print(f"  数量为0，已删除: {p['name']}")
+                                else:
+                                    new_parts[idx2]['quantity'] = new_qty
+                                    print(f"  数量已更新为 {new_qty}")
+                else:
+                    print("\n  清空原配件，重新选择...")
+                    new_parts = select_parts_for_order()
+
+                confirm = input(f"\n  ⚠ 确认重新结算？原配件将退库后重新扣库。(y/N): ").strip().lower()
+                if confirm != 'y':
+                    print("\n  已取消")
+                    input("\n按回车继续...")
+                    continue
+
+                ok, res = WorkOrderService.resettle_work_order(
+                    oid, new_desc, new_fc_id, new_labor, new_parts
+                )
+                if ok:
+                    print(f"\n  ✓ 工单重新结算成功！")
+                    print(f"    原金额: ¥{res['old_total']:.2f} → 新金额: ¥{res['new_total']:.2f}")
+                    diff = res['diff']
+                    if diff > 0:
+                        print(f"    差额: +¥{diff:.2f} (增加)")
+                    elif diff < 0:
+                        print(f"    差额: -¥{abs(diff):.2f} (减少)")
+                    else:
+                        print(f"    差额: ¥0.00 (不变)")
+                    print(f"    配件项数: {res['parts_count']}")
+                else:
+                    print(f"\n  ✗ 重新结算失败: {res}")
+            except Exception as e:
+                print(f"\n  ✗ 操作异常: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            input("\n按回车继续...")
+
+        elif choice == "6":
             print_header("查询车辆维修历史")
             plate = input_prompt("请输入车牌号", required=True)
             report = generate_history_report(plate)
@@ -692,6 +1039,7 @@ def main_menu():
 
 def main():
     init_db()
+    migrate_db()
     seed_sample_data()
     print("\n  系统初始化完成！")
     print(f"  保养周期: 每 {MAINTENANCE_INTERVAL} 公里")

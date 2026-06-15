@@ -162,12 +162,79 @@ class PurchaseSuggestionService:
         return PurchaseSuggestionRepository.get_all(status)
 
     @staticmethod
-    def mark_processed(ps_id):
+    def mark_processed(ps_id, actual_quantity=None):
+        suggestion = PurchaseSuggestionRepository.get_by_id(ps_id)
+        if not suggestion:
+            return False, "采购建议不存在"
+        if suggestion['status'] != 'PENDING':
+            status_map = {'PROCESSED': '已处理', 'IGNORED': '已忽略'}
+            return False, f"该采购建议已{status_map.get(suggestion['status'], suggestion['status'])}，无需重复处理"
+
+        part = PartRepository.get_by_id(suggestion['part_id'])
+        if not part:
+            return False, "关联配件不存在"
+
+        qty = actual_quantity if actual_quantity is not None else suggestion['suggested_quantity']
+        if qty <= 0:
+            return False, "采购数量必须大于0"
+
+        ok, err = PartService.stock_in(part['id'], qty, note=f'按采购建议#{ps_id}采购入库')
+        if not ok:
+            return False, f"入库失败: {err}"
+
         PurchaseSuggestionRepository.update_status(ps_id, 'PROCESSED')
+        return True, {
+            'part_name': part['name'],
+            'part_code': part['code'],
+            'purchased_qty': qty,
+            'new_stock': part['stock'] + qty
+        }
 
     @staticmethod
     def mark_ignored(ps_id):
         PurchaseSuggestionRepository.update_status(ps_id, 'IGNORED')
+
+    @staticmethod
+    def batch_process_suggestions(ps_ids_with_qty=None):
+        ps_ids_with_qty = ps_ids_with_qty or []
+        results = []
+        for item in ps_ids_with_qty:
+            ps_id = item['id']
+            qty = item.get('quantity')
+            ok, res = PurchaseSuggestionService.mark_processed(ps_id, qty)
+            results.append({'id': ps_id, 'success': ok, 'result': res})
+        return results
+
+    @staticmethod
+    def get_suggestion_statistics():
+        all_suggestions = PurchaseSuggestionRepository.get_all()
+        pending = [s for s in all_suggestions if s['status'] == 'PENDING']
+        processed = [s for s in all_suggestions if s['status'] == 'PROCESSED']
+        ignored = [s for s in all_suggestions if s['status'] == 'IGNORED']
+
+        total_pending_qty = sum(s['suggested_quantity'] for s in pending)
+        total_processed_qty = sum(s['suggested_quantity'] for s in processed)
+
+        low_parts = PartService.get_low_stock_parts()
+        low_stock_value = sum(p['price'] * p['stock'] for p in low_parts)
+        total_suggested_value = 0.0
+        for s in pending:
+            part = PartService.find_part_by_id(s['part_id'])
+            if part:
+                total_suggested_value += part['price'] * s['suggested_quantity']
+
+        return {
+            'total': len(all_suggestions),
+            'pending_count': len(pending),
+            'processed_count': len(processed),
+            'ignored_count': len(ignored),
+            'pending_parts_count': len(low_parts),
+            'total_pending_qty': total_pending_qty,
+            'total_processed_qty': total_processed_qty,
+            'total_suggested_value': round(total_suggested_value, 2),
+            'pending_suggestions': pending,
+            'low_stock_parts': low_parts
+        }
 
 
 class FaultCodeService:
@@ -280,11 +347,13 @@ class WorkOrderService:
         return order
 
     @staticmethod
-    def get_vehicle_history(plate_number):
+    def get_vehicle_history(plate_number, include_void=False):
         vehicle = VehicleRepository.get_by_plate(plate_number)
         if not vehicle:
             return None
         orders = WorkOrderRepository.get_by_vehicle_id(vehicle['id'])
+        if not include_void:
+            orders = [o for o in orders if o.get('status') != 'VOID']
         for o in orders:
             o['parts'] = WorkOrderPartRepository.get_by_work_order_id(o['id'])
         return {
@@ -293,8 +362,52 @@ class WorkOrderService:
         }
 
     @staticmethod
+    def get_vehicle_overview(plate_number):
+        vehicle = VehicleRepository.get_by_plate(plate_number)
+        if not vehicle:
+            return None, "未找到该车辆"
+
+        orders = WorkOrderRepository.get_by_vehicle_id(vehicle['id'])
+        normal_orders = [o for o in orders if o.get('status') != 'VOID']
+        normal_orders_sorted = sorted(
+            normal_orders,
+            key=lambda x: (x['created_at'], x['id']),
+            reverse=True
+        )
+
+        total_cost = sum(o['total_cost'] for o in normal_orders)
+        order_count = len(normal_orders)
+
+        latest_mileage = vehicle['last_maintenance_mileage']
+        if normal_orders_sorted:
+            latest_mileage = normal_orders_sorted[0]['mileage']
+
+        mileage_diff = latest_mileage - vehicle['last_maintenance_mileage']
+        maintenance_due = mileage_diff >= MAINTENANCE_INTERVAL
+        maintenance_remaining = MAINTENANCE_INTERVAL - mileage_diff
+
+        recent_orders = normal_orders_sorted[:5]
+        for o in recent_orders:
+            o['parts'] = WorkOrderPartRepository.get_by_work_order_id(o['id'])
+
+        void_count = len([o for o in orders if o.get('status') == 'VOID'])
+
+        return True, {
+            'vehicle': vehicle,
+            'total_spent': round(total_cost, 2),
+            'order_count': order_count,
+            'void_count': void_count,
+            'latest_mileage': latest_mileage,
+            'mileage_since_maintenance': mileage_diff,
+            'maintenance_due': maintenance_due,
+            'maintenance_remaining': max(maintenance_remaining, 0),
+            'recent_orders': recent_orders
+        }
+
+    @staticmethod
     def get_revenue_statistics(start_date, end_date):
         orders = WorkOrderRepository.get_by_date_range(start_date, end_date)
+        orders = [o for o in orders if o.get('status') != 'VOID']
         total_revenue = 0.0
         total_labor = 0.0
         total_parts_cost = 0.0
@@ -320,5 +433,114 @@ class WorkOrderService:
 
     @staticmethod
     def delete_work_order(order_id):
+        ok, err = WorkOrderRepository.delete(order_id)
+        return ok, err
+
+    @staticmethod
+    def cancel_work_order(order_id):
+        order = WorkOrderRepository.get_by_id(order_id)
+        if not order:
+            return False, "工单不存在"
+        if order.get('status') == 'VOID':
+            return False, "工单已被撤销，请勿重复操作"
+
+        parts = WorkOrderPartRepository.get_by_work_order_id(order_id)
+        for p in parts:
+            part = PartRepository.get_by_id(p['part_id'])
+            if not part:
+                continue
+            new_stock = part['stock'] + p['quantity']
+            PartRepository.update_stock(p['part_id'], new_stock)
+            PartTransactionRepository.create(
+                p['part_id'], p['quantity'], 'IN',
+                order_id=order_id, note=f'撤销工单#{order_id}回退库存'
+            )
+
+        WorkOrderRepository.update_status(order_id, 'VOID')
+        return True, {
+            'parts_count': len(parts),
+            'refund_amount': order['total_cost'],
+            'returned_stock': sum(p['quantity'] for p in parts)
+        }
+
+    @staticmethod
+    def resettle_work_order(order_id, new_fault_description=None,
+                            new_fault_code_id=None, new_labor_cost=None,
+                            new_parts=None):
+        order = WorkOrderRepository.get_by_id(order_id)
+        if not order:
+            return False, "工单不存在"
+        if order.get('status') == 'VOID':
+            return False, "已撤销的工单无法重新结算"
+
+        old_parts = WorkOrderPartRepository.get_by_work_order_id(order_id)
+        for p in old_parts:
+            part = PartRepository.get_by_id(p['part_id'])
+            if part:
+                new_stock = part['stock'] + p['quantity']
+                PartRepository.update_stock(p['part_id'], new_stock)
+                PartTransactionRepository.create(
+                    p['part_id'], p['quantity'], 'IN',
+                    order_id=order_id, note=f'重新结算回退库存'
+                )
+
         WorkOrderPartRepository.delete_by_work_order_id(order_id)
-        WorkOrderRepository.delete(order_id)
+
+        new_parts = new_parts or []
+        merged_parts = {}
+        for p in new_parts:
+            pid = p['part_id']
+            if pid in merged_parts:
+                merged_parts[pid]['quantity'] += p['quantity']
+            else:
+                merged_parts[pid] = {'part_id': pid, 'quantity': p['quantity']}
+        new_parts = list(merged_parts.values())
+
+        parts_total = 0.0
+        valid_parts = []
+        for p in new_parts:
+            part = PartRepository.get_by_id(p['part_id'])
+            if not part:
+                continue
+            if part['stock'] < p['quantity']:
+                continue
+            subtotal = part['price'] * p['quantity']
+            parts_total += subtotal
+            valid_parts.append({
+                'part_id': part['id'],
+                'part_name': part['name'],
+                'part_code': part['code'],
+                'unit_price': part['price'],
+                'quantity': p['quantity'],
+                'subtotal': subtotal
+            })
+
+        labor_cost = new_labor_cost if new_labor_cost is not None else order['labor_cost']
+        total_cost = parts_total + float(labor_cost)
+
+        updates = {
+            'labor_cost': labor_cost,
+            'total_cost': total_cost,
+            'status': 'NORMAL'
+        }
+        if new_fault_description is not None:
+            updates['fault_description'] = new_fault_description
+        if new_fault_code_id is not None:
+            updates['fault_code_id'] = new_fault_code_id
+
+        WorkOrderRepository.update_full(order_id, **updates)
+
+        for vp in valid_parts:
+            WorkOrderPartRepository.create(
+                order_id, vp['part_id'], vp['part_name'], vp['part_code'],
+                vp['unit_price'], vp['quantity'], vp['subtotal']
+            )
+            PartService.stock_out(vp['part_id'], vp['quantity'], order_id=order_id)
+
+        return True, {
+            'order_id': order_id,
+            'old_total': order['total_cost'],
+            'new_total': total_cost,
+            'diff': round(total_cost - order['total_cost'], 2),
+            'parts_count': len(valid_parts)
+        }
